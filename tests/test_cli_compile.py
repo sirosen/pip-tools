@@ -3838,3 +3838,211 @@ def test_stdout_should_not_be_read_when_stdin_is_not_a_plain_file(
     out = runner.invoke(cli, [req_in.as_posix(), "--output-file", fifo.as_posix()])
 
     assert out.exit_code == 0, out
+
+
+@pytest.mark.parametrize(
+    (
+        "first_order_path_absolute",
+        "second_order_path_absolute",
+        "normed_output_absolute",
+    ),
+    (
+        # requirements.in + requirements2.in -> requirements2.in
+        pytest.param(False, False, False, id="both-relative"),
+        # /foo/requirements.in + /foo/requirements2.in -> /foo/requirements2.in
+        pytest.param(True, True, True, id="both-absolute"),
+        # /foo/requirements.in + requirements2.in -> /foo/requirements2.in
+        pytest.param(True, False, True, id="absolute-includes-relative"),
+        # requirements.in + /foo/requirements2.in -> requirements2.in
+        pytest.param(False, True, False, id="relative-includes-absolute"),
+    ),
+)
+def test_second_order_requirements_path_handling(
+    pip_conf,
+    runner,
+    tmp_path,
+    monkeypatch,
+    first_order_path_absolute,
+    second_order_path_absolute,
+    normed_output_absolute,
+):
+    """
+    Given nested requirements files, the internal requirements will be written
+    in the output, and it will be absolute or relative depending only on
+    whether or not the initial path was absolute or relative.
+
+    This is only accurate on pip>=24.3 , as earlier versions do not normalize
+    the `comes_from` data to absolute paths.
+    On lower pip versions, assert the previous output is produced, in which
+    `-r` inputs are preserved.
+    """
+    # in pip v24.3, new normalization will occur because `comes_from` started
+    # to be normalized to abspaths
+    pip_current_version = get_pip_version_for_python_executable(sys.executable)
+    expect_new_normalization = pip_current_version >= Version("24.3")
+
+    # setup: there are two files, the second one has an actual package name
+    req_in = tmp_path / "requirements.in"
+    req_in2 = tmp_path / "requirements2.in"
+    req_in2.write_text("small-fake-a\n")
+    # the data for the first file is written based on whether or not the
+    # second-order path is absolute
+    if second_order_path_absolute:
+        req_in.write_text(f"-r {req_in2}\n")
+    else:
+        req_in.write_text("-r ./requirements2.in\n")
+
+    # and the first order path is given on the CLI as absolute or relative
+    if first_order_path_absolute:
+        input_path = str(req_in)
+    else:
+        input_path = "requirements.in"
+
+    monkeypatch.chdir(tmp_path)
+    out = runner.invoke(
+        cli,
+        [
+            "--output-file",
+            "-",
+            "--quiet",
+            "--no-header",
+            "--no-emit-options",
+            "-r",
+            input_path,
+        ],
+    )
+    monkeypatch.undo()
+
+    assert out.exit_code == 0
+    # either we have the new normalization steps apply, and we'll get the abspath
+    # or the relative path
+    if expect_new_normalization:
+        if normed_output_absolute:
+            output_path = str(req_in2)
+        else:
+            output_path = "requirements2.in"
+    # or else it's the older codepath (earlier pip versions) and each of the four input
+    # cases produces slightly different output
+    # exact input path in the output
+    else:
+        if first_order_path_absolute and second_order_path_absolute:  # True, True
+            output_path = str(req_in2)
+        elif (
+            not first_order_path_absolute and second_order_path_absolute
+        ):  # False, True
+            output_path = "requirements2.in"
+        elif (
+            first_order_path_absolute and not second_order_path_absolute
+        ):  # True, False
+            output_path = str(tmp_path) + "/./requirements2.in"
+        else:  # False, False
+            output_path = "./requirements2.in"
+    assert out.stdout == dedent(
+        f"""\
+        small-fake-a==0.2
+            # via -r {output_path}
+        """
+    )
+
+
+@pytest.mark.parametrize(
+    "relative_requirement_location", ("parent", "subdir", "sibling_dir")
+)
+def test_second_order_requirements_relative_path_in_separate_dir(
+    pip_conf, runner, tmp_path, monkeypatch, relative_requirement_location
+):
+    """
+    As in the above test, nested requirements file path handling.
+    But in this case, the primary variable is the relative location of the two
+    requirements.
+
+    The expectation is that the output path will be relative to the current
+    working directory, *not* relative to the dir containing the initial
+    requirements file.
+
+    Parent dir layout:
+       - root_dir/
+         - requirements2.in
+         - subdir/
+           - requirements.in  # containing '-r ../requirements2.in'
+
+    Subdir layout:
+       - root_dir/
+         - requirements.in  # containing '-r ./subdir/requirements2.in'
+         - subdir/
+           - requirements2.in
+
+    Sibling dir layout:
+       - root_dir/
+         - subdir1/
+           - requirements.in  # containing '-r ../subdir2/requirements2.in'
+         - subdir2/
+           - requirements2.in
+    """
+    pip_current_version = get_pip_version_for_python_executable(sys.executable)
+    expect_path_normalization = pip_current_version >= Version("24.3")
+
+    # setup the two files in the requested dir layout
+    if relative_requirement_location == "parent":
+        (tmp_path / "subdir").mkdir()
+        req_in = tmp_path / "subdir" / "requirements.in"
+        req_in.write_text("-r ../requirements2.in\n")
+        req_in2 = tmp_path / "requirements2.in"
+        req_in2.write_text("small-fake-a\n")
+
+        if expect_path_normalization:
+            output_path = "requirements2.in"
+        else:
+            output_path = "subdir/../requirements2.in"
+    elif relative_requirement_location == "subdir":
+        req_in = tmp_path / "requirements.in"
+        req_in.write_text("-r ./subdir/requirements2.in\n")
+        (tmp_path / "subdir").mkdir()
+        req_in2 = tmp_path / "subdir" / "requirements2.in"
+        req_in2.write_text("small-fake-a\n")
+
+        if expect_path_normalization:
+            output_path = "subdir/requirements2.in"
+        else:
+            output_path = "./subdir/requirements2.in"
+    elif relative_requirement_location == "sibling_dir":
+        (tmp_path / "subdir1").mkdir()
+        req_in = tmp_path / "subdir1" / "requirements.in"
+        req_in.write_text("-r ../subdir2/requirements2.in\n")
+        (tmp_path / "subdir2").mkdir()
+        req_in2 = tmp_path / "subdir2" / "requirements2.in"
+        req_in2.write_text("small-fake-a\n")
+
+        if expect_path_normalization:
+            output_path = "subdir2/requirements2.in"
+        else:
+            output_path = "subdir1/../subdir2/requirements2.in"
+    else:
+        # test params didn't match body
+        raise NotImplementedError(relative_requirement_location)
+
+    # the input is given relative to the starting dir
+    input_path = str(req_in.relative_to(tmp_path))
+
+    monkeypatch.chdir(tmp_path)
+    out = runner.invoke(
+        cli,
+        [
+            "--output-file",
+            "-",
+            "--quiet",
+            "--no-header",
+            "--no-emit-options",
+            "-r",
+            input_path,
+        ],
+    )
+    monkeypatch.undo()
+
+    assert out.exit_code == 0
+    assert out.stdout == dedent(
+        f"""\
+        small-fake-a==0.2
+            # via -r {output_path}
+        """
+    )
