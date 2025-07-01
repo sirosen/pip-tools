@@ -3888,13 +3888,13 @@ def test_second_order_requirements_path_handling(
     # the data for the first file is written based on whether or not the
     # second-order path is absolute
     if second_order_path_absolute:
-        req_in.write_text(f"-r {req_in2}\n")
+        req_in.write_text(f"-r {req_in2.as_posix()}\n")
     else:
         req_in.write_text("-r ./requirements2.in\n")
 
     # and the first order path is given on the CLI as absolute or relative
     if first_order_path_absolute:
-        input_path = str(req_in)
+        input_path = req_in.as_posix()
     else:
         input_path = "requirements.in"
 
@@ -3918,7 +3918,7 @@ def test_second_order_requirements_path_handling(
     # or the relative path
     if expect_new_normalization:
         if normed_output_absolute:
-            output_path = str(req_in2)
+            output_path = req_in2.as_posix()
         else:
             output_path = "requirements2.in"
     # or else it's the older codepath (earlier pip versions) and each of the four input
@@ -3926,7 +3926,7 @@ def test_second_order_requirements_path_handling(
     # exact input path in the output
     else:
         if first_order_path_absolute and second_order_path_absolute:  # True, True
-            output_path = str(req_in2)
+            output_path = req_in2.as_posix()
         elif (
             not first_order_path_absolute and second_order_path_absolute
         ):  # False, True
@@ -3934,7 +3934,7 @@ def test_second_order_requirements_path_handling(
         elif (
             first_order_path_absolute and not second_order_path_absolute
         ):  # True, False
-            output_path = str(tmp_path) + "/./requirements2.in"
+            output_path = tmp_path.as_posix() + "/./requirements2.in"
         else:  # False, False
             output_path = "./requirements2.in"
     assert out.stdout == dedent(
@@ -4022,7 +4022,7 @@ def test_second_order_requirements_relative_path_in_separate_dir(
         raise NotImplementedError(relative_requirement_location)
 
     # the input is given relative to the starting dir
-    input_path = str(req_in.relative_to(tmp_path))
+    input_path = req_in.relative_to(tmp_path).as_posix()
 
     monkeypatch.chdir(tmp_path)
     out = runner.invoke(
