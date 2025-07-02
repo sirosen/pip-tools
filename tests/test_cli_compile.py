@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import os
 import pathlib
@@ -7,6 +8,7 @@ import re
 import shutil
 import subprocess
 import sys
+import typing
 from textwrap import dedent
 from unittest import mock
 from unittest.mock import MagicMock
@@ -37,6 +39,55 @@ backtracking_resolver_only = pytest.mark.parametrize(
     ("backtracking",),
     indirect=("current_resolver",),
 )
+
+
+@pytest.fixture(scope="session")
+def installed_pip_version():
+    return get_pip_version_for_python_executable(sys.executable)
+
+
+@pytest.fixture(scope="session")
+def pip_produces_absolute_paths(installed_pip_version):
+    # in pip v24.3, new normalization will occur because `comes_from` started
+    # to be normalized to abspaths
+    return installed_pip_version >= Version("24.3")
+
+
+@dataclasses.dataclass
+class TestFilesCollection:
+    """
+    A small data-builder for setting up files in a tmp dir.
+
+    Contains a name for use as the ID in parametrized tests and contents.
+    'contents' maps from subpaths in the tmp dir to file content or callables
+    which produce file content given the tmp dir.
+    """
+
+    # the name for the collection of files
+    name: str
+    # static or computed contents
+    contents: dict[str, str | typing.Callable[[pathlib.Path], str]]
+
+    def __str__(self) -> str:
+        return self.name
+
+    def populate(self, tmp_path: pathlib.Path) -> None:
+        """Populate the tmp dir with file contents."""
+        for path_str, content in self.contents.items():
+            path = tmp_path / path_str
+            path.parent.mkdir(exist_ok=True, parents=True)
+            if isinstance(content, str):
+                path.write_text(content)
+            else:
+                path.write_text(content(tmp_path))
+
+    def get_path_to(self, filename: str) -> str:
+        """Given a filename, find the (first) path to that filename in the contents."""
+        return next(
+            k
+            for k in self.contents.keys()
+            if (k == filename) or k.endswith(f"/{filename}")
+        )
 
 
 @pytest.fixture(
@@ -3840,31 +3891,34 @@ def test_stdout_should_not_be_read_when_stdin_is_not_a_plain_file(
     assert out.exit_code == 0, out
 
 
+@pytest.mark.parametrize("input_path_absolute", (True, False))
 @pytest.mark.parametrize(
+    "test_files_collection",
     (
-        "first_order_path_absolute",
-        "second_order_path_absolute",
-        "normed_output_absolute",
+        TestFilesCollection(
+            "relative_include",
+            {
+                "requirements2.in": "small-fake-a\n",
+                "requirements.in": "-r requirements2.in\n",
+            },
+        ),
+        TestFilesCollection(
+            "absolute_include",
+            {
+                "requirements2.in": "small-fake-a\n",
+                "requirements.in": lambda tmpdir: f"-r {(tmpdir / 'requirements2.in').as_posix()}",
+            },
+        ),
     ),
-    (
-        # requirements.in + requirements2.in -> requirements2.in
-        pytest.param(False, False, False, id="both-relative"),
-        # /foo/requirements.in + /foo/requirements2.in -> /foo/requirements2.in
-        pytest.param(True, True, True, id="both-absolute"),
-        # /foo/requirements.in + requirements2.in -> /foo/requirements2.in
-        pytest.param(True, False, True, id="absolute-includes-relative"),
-        # requirements.in + /foo/requirements2.in -> requirements2.in
-        pytest.param(False, True, False, id="relative-includes-absolute"),
-    ),
+    ids=str,
 )
 def test_second_order_requirements_path_handling(
     pip_conf,
     runner,
     tmp_path,
     monkeypatch,
-    first_order_path_absolute,
-    second_order_path_absolute,
-    normed_output_absolute,
+    input_path_absolute,
+    test_files_collection,
 ):
     """
     Given nested requirements files, the internal requirements will be written
@@ -3876,67 +3930,34 @@ def test_second_order_requirements_path_handling(
     On lower pip versions, assert the previous output is produced, in which
     `-r` inputs are preserved.
     """
-    # in pip v24.3, new normalization will occur because `comes_from` started
-    # to be normalized to abspaths
-    pip_current_version = get_pip_version_for_python_executable(sys.executable)
-    expect_new_normalization = pip_current_version >= Version("24.3")
+    test_files_collection.populate(tmp_path)
 
-    # setup: there are two files, the second one has an actual package name
-    req_in = tmp_path / "requirements.in"
-    req_in2 = tmp_path / "requirements2.in"
-    req_in2.write_text("small-fake-a\n")
-    # the data for the first file is written based on whether or not the
-    # second-order path is absolute
-    if second_order_path_absolute:
-        req_in.write_text(f"-r {req_in2.as_posix()}\n")
-    else:
-        req_in.write_text("-r ./requirements2.in\n")
-
-    # and the first order path is given on the CLI as absolute or relative
-    if first_order_path_absolute:
-        input_path = req_in.as_posix()
+    # the input path is given on the CLI as absolute or relative
+    # and this determines the expected output path as well
+    if input_path_absolute:
+        input_path = (tmp_path / "requirements.in").as_posix()
+        output_path = (tmp_path / "requirements2.in").as_posix()
     else:
         input_path = "requirements.in"
+        output_path = "requirements2.in"
 
-    monkeypatch.chdir(tmp_path)
-    out = runner.invoke(
-        cli,
-        [
-            "--output-file",
-            "-",
-            "--quiet",
-            "--no-header",
-            "--no-emit-options",
-            "-r",
-            input_path,
-        ],
-    )
-    monkeypatch.undo()
+    with monkeypatch.context() as m:
+        m.chdir(tmp_path)
+
+        out = runner.invoke(
+            cli,
+            [
+                "--output-file",
+                "-",
+                "--quiet",
+                "--no-header",
+                "--no-emit-options",
+                "-r",
+                input_path,
+            ],
+        )
 
     assert out.exit_code == 0
-    # either we have the new normalization steps apply, and we'll get the abspath
-    # or the relative path
-    if expect_new_normalization:
-        if normed_output_absolute:
-            output_path = req_in2.as_posix()
-        else:
-            output_path = "requirements2.in"
-    # or else it's the older codepath (earlier pip versions) and each of the four input
-    # cases produces slightly different output
-    # exact input path in the output
-    else:
-        if first_order_path_absolute and second_order_path_absolute:  # True, True
-            output_path = req_in2.as_posix()
-        elif (
-            not first_order_path_absolute and second_order_path_absolute
-        ):  # False, True
-            output_path = "requirements2.in"
-        elif (
-            first_order_path_absolute and not second_order_path_absolute
-        ):  # True, False
-            output_path = tmp_path.as_posix() + "/./requirements2.in"
-        else:  # False, False
-            output_path = "./requirements2.in"
     assert out.stdout == dedent(
         f"""\
         small-fake-a==0.2
@@ -3946,10 +3967,39 @@ def test_second_order_requirements_path_handling(
 
 
 @pytest.mark.parametrize(
-    "relative_requirement_location", ("parent", "subdir", "sibling_dir")
+    "test_files_collection",
+    (
+        TestFilesCollection(
+            "parent_dir",
+            {
+                "requirements2.in": "small-fake-a\n",
+                "subdir/requirements.in": "-r ../requirements2.in\n",
+            },
+        ),
+        TestFilesCollection(
+            "subdir",
+            {
+                "requirements.in": "-r ./subdir/requirements2.in",
+                "subdir/requirements2.in": "small-fake-a\n",
+            },
+        ),
+        TestFilesCollection(
+            "sibling_dir",
+            {
+                "subdir1/requirements.in": "-r ../subdir2/requirements2.in",
+                "subdir2/requirements2.in": "small-fake-a\n",
+            },
+        ),
+    ),
+    ids=str,
 )
 def test_second_order_requirements_relative_path_in_separate_dir(
-    pip_conf, runner, tmp_path, monkeypatch, relative_requirement_location
+    pip_conf,
+    runner,
+    tmp_path,
+    monkeypatch,
+    test_files_collection,
+    pip_produces_absolute_paths,
 ):
     """
     As in the above test, nested requirements file path handling.
@@ -3959,85 +4009,39 @@ def test_second_order_requirements_relative_path_in_separate_dir(
     The expectation is that the output path will be relative to the current
     working directory, *not* relative to the dir containing the initial
     requirements file.
-
-    Parent dir layout:
-       - root_dir/
-         - requirements2.in
-         - subdir/
-           - requirements.in  # containing '-r ../requirements2.in'
-
-    Subdir layout:
-       - root_dir/
-         - requirements.in  # containing '-r ./subdir/requirements2.in'
-         - subdir/
-           - requirements2.in
-
-    Sibling dir layout:
-       - root_dir/
-         - subdir1/
-           - requirements.in  # containing '-r ../subdir2/requirements2.in'
-         - subdir2/
-           - requirements2.in
     """
-    pip_current_version = get_pip_version_for_python_executable(sys.executable)
-    expect_path_normalization = pip_current_version >= Version("24.3")
+    test_files_collection.populate(tmp_path)
+    # the input is the path to 'requirements.in' relative to the starting dir
+    input_path = test_files_collection.get_path_to("requirements.in")
+    # the output should also be relative to the starting dir, the path to 'requirements2.in'
+    output_path = test_files_collection.get_path_to("requirements2.in")
 
-    # setup the two files in the requested dir layout
-    if relative_requirement_location == "parent":
-        (tmp_path / "subdir").mkdir()
-        req_in = tmp_path / "subdir" / "requirements.in"
-        req_in.write_text("-r ../requirements2.in\n")
-        req_in2 = tmp_path / "requirements2.in"
-        req_in2.write_text("small-fake-a\n")
+    # for older pip versions, recompute the output path to be relative to the input path
+    if not pip_produces_absolute_paths:
+        # traverse upwards to the root tmp dir, and append the output path to that
+        # similar to pathlib.Path.relative_to(..., walk_up=True)
+        relative_segments = len(pathlib.Path(input_path).parents) - 1
+        output_path = str(
+            pathlib.Path(input_path).parent / ("../" * relative_segments) / output_path
+        )
+        # pathlib paths normalize `./foo` to `foo` automatically; de-norm that case
+        if str(pathlib.Path(input_path).parent) == ".":
+            output_path = "./" + output_path
 
-        if expect_path_normalization:
-            output_path = "requirements2.in"
-        else:
-            output_path = "subdir/../requirements2.in"
-    elif relative_requirement_location == "subdir":
-        req_in = tmp_path / "requirements.in"
-        req_in.write_text("-r ./subdir/requirements2.in\n")
-        (tmp_path / "subdir").mkdir()
-        req_in2 = tmp_path / "subdir" / "requirements2.in"
-        req_in2.write_text("small-fake-a\n")
-
-        if expect_path_normalization:
-            output_path = "subdir/requirements2.in"
-        else:
-            output_path = "./subdir/requirements2.in"
-    elif relative_requirement_location == "sibling_dir":
-        (tmp_path / "subdir1").mkdir()
-        req_in = tmp_path / "subdir1" / "requirements.in"
-        req_in.write_text("-r ../subdir2/requirements2.in\n")
-        (tmp_path / "subdir2").mkdir()
-        req_in2 = tmp_path / "subdir2" / "requirements2.in"
-        req_in2.write_text("small-fake-a\n")
-
-        if expect_path_normalization:
-            output_path = "subdir2/requirements2.in"
-        else:
-            output_path = "subdir1/../subdir2/requirements2.in"
-    else:
-        # test params didn't match body
-        raise NotImplementedError(relative_requirement_location)
-
-    # the input is given relative to the starting dir
-    input_path = req_in.relative_to(tmp_path).as_posix()
-
-    monkeypatch.chdir(tmp_path)
-    out = runner.invoke(
-        cli,
-        [
-            "--output-file",
-            "-",
-            "--quiet",
-            "--no-header",
-            "--no-emit-options",
-            "-r",
-            input_path,
-        ],
-    )
-    monkeypatch.undo()
+    with monkeypatch.context() as m:
+        m.chdir(tmp_path)
+        out = runner.invoke(
+            cli,
+            [
+                "--output-file",
+                "-",
+                "--quiet",
+                "--no-header",
+                "--no-emit-options",
+                "-r",
+                input_path,
+            ],
+        )
 
     assert out.exit_code == 0
     assert out.stdout == dedent(
