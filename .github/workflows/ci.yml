@@ -6,6 +6,7 @@ on:
   push:
     branches:
       - main
+      - speculative-fix
     tags:
   workflow_call:
     inputs:
