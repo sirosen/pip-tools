@@ -45,7 +45,7 @@ def copy_install_requirement(
 ) -> InstallRequirement:
     """Make a copy of a template ``InstallRequirement`` with extra kwargs."""
     # Prepare install requirement kwargs.
-    kwargs = {
+    kwargs: dict[str, _t.Any] = {
         "comes_from": template.comes_from,
         "editable": template.editable,
         "link": template.link,
@@ -58,8 +58,8 @@ def copy_install_requirement(
     }
     if _pip_version.PIP_VERSION_MAJOR_MINOR < (25, 3):  # pragma: <3.9 cover
         # Ref: https://github.com/jazzband/pip-tools/issues/2252
-        kwargs["use_pep517"] = template.use_pep517
-        kwargs["global_options"] = template.global_options
+        kwargs["use_pep517"] = template.use_pep517  # type: ignore[attr-defined]
+        kwargs["global_options"] = template.global_options  # type: ignore[attr-defined]
     kwargs.update(extra_kwargs)
 
     if _pip_version.PIP_VERSION_MAJOR_MINOR >= (25, 3):  # pragma: >=3.9 cover
@@ -68,7 +68,7 @@ def copy_install_requirement(
         kwargs.pop("global_options", None)
 
     if _pip_version.PIP_VERSION_MAJOR_MINOR <= (23, 0):
-        kwargs["install_options"] = template.install_options
+        kwargs["install_options"] = template.install_options  # type: ignore[attr-defined]
 
     # Original link does not belong to install requirements constructor,
     # pop it now to update later.
