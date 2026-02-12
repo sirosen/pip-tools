@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pip._internal.index.package_finder import PackageFinder
 from pip._internal.req import InstallRequirement
+from pip._vendor.packaging.utils import canonicalize_name
 
 from . import pip_version as _pip_version
 
@@ -23,10 +24,14 @@ def finder_allows_prereleases_of_req(
     is.
     """
     if _pip_version.PIP_VERSION_MAJOR_MINOR < (26, 0):
-        return finder.allow_all_prereleases  # type: ignore[no-any-return]
+        return bool(finder.allow_all_prereleases)  # type: ignore[attr-defined]
     else:
-        return finder.release_control.allows_prereleases(  # type: ignore[no-any-return]
-            ireq.req.name
+        if finder.release_control is None:
+            return False
+        if ireq.req is None:
+            return False
+        return bool(
+            finder.release_control.allows_prereleases(canonicalize_name(ireq.req.name))
         )
 
 
@@ -38,6 +43,8 @@ def finder_allows_all_prereleases(finder: PackageFinder) -> bool:
     is. However, ``--pre`` is translated internally to ``":all:"`` on those versions.
     """
     if _pip_version.PIP_VERSION_MAJOR_MINOR < (26, 0):
-        return bool(finder.allow_all_prereleases)
+        return bool(finder.allow_all_prereleases)  # type: ignore[attr-defined]
     else:
+        if finder.release_control is None:
+            return False
         return ":all:" in finder.release_control.all_releases
