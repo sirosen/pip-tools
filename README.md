@@ -14,9 +14,9 @@
 `pip-tools` keeps your `pip`-based packages fresh, even when you've pinned them.
 
 `pip-compile` reads your top-level dependencies from `pyproject.toml`, `setup.cfg`, `setup.py`, or
-`requirements.in` and writes a pinned `requirements.txt` that `pip install -r` can replay. `pip-sync`
-makes a virtual environment match that file: it installs what you list, uninstalls what you don't, and
-upgrades anything that drifted.
+`requirements.in` and writes a pinned `requirements.txt` that `pip install -r` can use.
+`pip-sync` makes a virtual environment match that file: it installs what you
+list, uninstalls what you don't, and updates anything that drifted.
 
 [**Full documentation**][docs]
 
@@ -45,9 +45,10 @@ sqlparse==0.4.4
     # via django
 ```
 
-`pip-compile` reads `[project].dependencies` from `pyproject.toml` (or a `requirements.in`, `setup.py`,
-or `setup.cfg`), resolves transitive dependencies, and pins everything. The output is plain `pip` syntax
-that any `pip install -r` can install.
+`pip-compile` reads `[project].dependencies` from `pyproject.toml`, resolves
+transitive dependencies, and pins everything.
+
+The output is plain `pip` syntax that any `pip install -r` can install.
 
 Bump one package without disturbing the rest:
 
