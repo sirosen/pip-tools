@@ -362,8 +362,10 @@ def get_compile_command(click_ctx: click.Context) -> str:
         if value is None:
             continue
 
-        # Skip options with a default value
-        if option.default == value:
+        # Skip options with a default value.
+        # Use a new Context so that values from config files are
+        # not treated as defaults.
+        if option.get_default(click.Context(click_ctx.command)) == value:
             continue
 
         # Use a file name for file-like objects
